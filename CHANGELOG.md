@@ -4,6 +4,13 @@ All notable changes will follow [Keep a Changelog](https://keepachangelog.com/en
 
 ## [Unreleased]
 
+## [0.1.1]
+
+### Changed
+
+- The release workflow checks out `refs/tags/<tag>`, so a manual run that names a branch fails before publishing.
+- npm keywords for discovery in the Pi package gallery and npm search.
+
 ## [0.1.0]
 
 ### Added

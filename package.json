@@ -1,6 +1,6 @@
 {
   "name": "@twkrash/pi-headroom",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Headroom compression for Pi tool results: compressed once when a tool finishes, so the prompt cache stays intact. Works with every provider and with subagents.",
   "type": "module",
   "license": "MIT",
@@ -18,9 +18,17 @@
     "pi",
     "pi-extension",
     "pi-coding-agent",
+    "coding-agent",
+    "ai-agent",
+    "llm",
     "headroom",
     "context-compression",
-    "llm"
+    "token-optimization",
+    "token-usage",
+    "prompt-caching",
+    "tool-output",
+    "subagents",
+    "cost-reduction"
   ],
   "engines": {
     "node": ">=22.19.0"
