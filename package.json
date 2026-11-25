@@ -1,0 +1,64 @@
+{
+  "name": "@twkrash/pi-headroom",
+  "version": "0.1.0",
+  "description": "Headroom compression for Pi tool results: compressed once when a tool finishes, so the prompt cache stays intact. Works with every provider and with subagents.",
+  "type": "module",
+  "license": "MIT",
+  "author": "twKrash",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/twKrash/pi-headroom.git"
+  },
+  "homepage": "https://github.com/twKrash/pi-headroom#readme",
+  "bugs": {
+    "url": "https://github.com/twKrash/pi-headroom/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "pi-coding-agent",
+    "headroom",
+    "context-compression",
+    "llm"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "lint": "biome lint .",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/*.test.ts",
+    "knip": "knip"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.3.15",
+    "@earendil-works/pi-ai": "1.6.1",
+    "@earendil-works/pi-coding-agent": "1.6.1",
+    "@types/node": "22.19.7",
+    "knip": "6.35.1",
+    "typebox": "1.4.7",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,394 @@
+name: Release
+
+# Security boundary: a protected `v*` tag starts this workflow, the `publish`
+# job runs inside the `npm-publish` environment, and npm exchanges the job's
+# GitHub OIDC token for a short-lived credential only after checking the
+# repository, workflow file, and environment against its trusted publisher
+# configuration. No long-lived npm token exists anywhere in this repository.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to publish, e.g. v1.0.1
+        required: true
+
+permissions:
+  contents: read
+
+# Never cancel a release mid-flight, and never run two for the same tag. The key
+# is the tag name, so a tag push and a workflow_dispatch for the same release
+# share one queue instead of racing each other.
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    name: qualify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Refuse a tag that disagrees with the package version
+        id: tag
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -eu
+          version="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::tag $TAG does not match package version v$version"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Collect the CHANGELOG section for this version
+        id: notes
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -eu
+          awk -v v="$VERSION" \
+            '$0 ~ "^## \\[" v "\\]" { flag = 1; next } /^## \[/ { flag = 0 } flag' \
+            CHANGELOG.md | sed -e '/./,$!d' > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::error::CHANGELOG.md has no '## [$VERSION]' section"
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.1
+          cache: npm
+
+      # The artifact's bytes are produced here, so the toolchain that packs them
+      # is pinned rather than inherited from the runner image. `publish` pins the
+      # same two versions.
+      - name: Use the pinned toolchain
+        run: |
+          npm install --global npm@11.19.1
+          node --version
+          npm --version
+
+      - run: npm ci
+
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run knip
+      - run: npm test
+
+      - name: Pack the release artifact
+        run: |
+          set -eu
+          npm pack --json > pack.json
+          node -e '
+            const { readFileSync, appendFileSync } = require("node:fs");
+            const [entry] = JSON.parse(readFileSync("pack.json", "utf8"));
+            appendFileSync(process.env.GITHUB_ENV, `TARBALL=${entry.filename}\n`);
+          '
+
+      - name: Record the artifact hashes and metadata
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -eu
+          sha1sum "$TARBALL" > SHA1SUMS
+          sha512sum "$TARBALL" > SHA512SUMS
+          node -e '
+            const { readFileSync, writeFileSync } = require("node:fs");
+            const pkg = JSON.parse(readFileSync("package.json", "utf8"));
+            const first = (file) => readFileSync(file, "utf8").split(/\s+/)[0];
+            writeFileSync(
+              "release-metadata.json",
+              JSON.stringify(
+                {
+                  name: pkg.name,
+                  version: pkg.version,
+                  sha1: first("SHA1SUMS"),
+                  sha512: first("SHA512SUMS"),
+                },
+                null,
+                2,
+              ) + "\n",
+            );
+          '
+          cat SHA1SUMS SHA512SUMS release-metadata.json
+
+      - name: Inspect the tarball that will be published
+        run: |
+          set -eu
+          rm -rf inspected && mkdir inspected
+          tar -xzf "$TARBALL" -C inspected
+          node -e '
+            const { readFileSync, readdirSync, statSync } = require("node:fs");
+            const { join } = require("node:path");
+            const root = "inspected/package";
+            const files = readdirSync(root, { recursive: true }).filter((f) =>
+              statSync(join(root, f)).isFile(),
+            );
+            const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+            const source = JSON.parse(readFileSync("package.json", "utf8"));
+            const fail = (message) => { console.error(`::error::${message}`); process.exit(1); };
+            if (pkg.name !== source.name) fail(`name ${pkg.name} != ${source.name}`);
+            if (pkg.version !== source.version) fail(`version ${pkg.version} != ${source.version}`);
+            if (pkg.publishConfig?.access !== "public") fail("publishConfig.access is not public");
+            if (pkg.peerDependencies?.["@earendil-works/pi-coding-agent"] !== "*") fail("pi-coding-agent peer range changed");
+            if (!files.includes("src/index.ts")) fail("missing Pi extension entry point");
+            for (const required of ["README.md", "LICENSE", "CHANGELOG.md"]) {
+              if (!files.includes(required)) fail(`missing ${required}`);
+            }
+            const forbidden = files.filter((f) =>
+              /^(tests|\.github)\//.test(f) || /\.(map|tgz)$/.test(f),
+            );
+            if (forbidden.length > 0) fail(`forbidden files: ${forbidden.join(", ")}`);
+            console.log(`inspected ${files.length} files: ${pkg.name}@${pkg.version}`);
+          '
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-package
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            *.tgz
+            SHA1SUMS
+            SHA512SUMS
+            release-metadata.json
+            notes.md
+
+  publish:
+    name: publish
+    needs: qualify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write
+    # The registry is named here, not through `setup-node`'s `registry-url`:
+    # that option writes `_authToken=${NODE_AUTH_TOKEN}` into `.npmrc` and
+    # injects the GitHub token under that name, which makes npm treat the run as
+    # token-authenticated and skip the OIDC trusted-publishing exchange. The
+    # registry then rejects a credential it never issued.
+    env:
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.1
+
+      # Pinned deliberately: trusted publishing needs npm 11.5.1 or newer, and a
+      # floating `npm@latest` would silently change what packs and publishes. The
+      # artifact itself is never repacked here: this job publishes the exact
+      # `.tgz` that `qualify` produced and verified.
+      - name: Use the pinned npm that exchanges the OIDC token
+        run: |
+          npm install --global npm@11.19.1
+          npm --version
+
+      - name: Verify the downloaded artifact before publishing
+        run: |
+          set -eu
+          sha1sum --check SHA1SUMS
+          sha512sum --check SHA512SUMS
+
+      - name: Show the OIDC claims npm will present
+        run: |
+          set -eu
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+            echo "::error::this job needs id-token: write"
+            exit 1
+          fi
+          token="$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org" | \
+            node -e 'let s="";process.stdin.on("data",(d)=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).value))')"
+          echo "::add-mask::$token"
+          echo "NPM_ID_TOKEN=$token" >> "$GITHUB_ENV"
+          node -e '
+            const claims = JSON.parse(
+              Buffer.from(process.argv[1].split(".")[1], "base64").toString("utf8"),
+            );
+            const fields = [
+              "repository", "repository_owner", "repository_visibility",
+              "workflow_ref", "job_workflow_ref", "environment", "ref", "event_name",
+            ];
+            for (const field of fields) {
+              if (claims[field] !== undefined) console.log(`${field}: ${claims[field]}`);
+            }
+          ' "$token" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish, unless this version is already on the registry
+        env:
+          # npm's OIDC exchange swallows its own failures at this level, so a
+          # failed exchange surfaces only as ENEEDAUTH. Verbose keeps the
+          # registry's reason in the release log.
+          NPM_CONFIG_LOGLEVEL: verbose
+        run: |
+          set -eu
+          name="$(node -p "require('./release-metadata.json').name")"
+          version="$(node -p "require('./release-metadata.json').version")"
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "$name@$version is already published; nothing to publish"
+          else
+            # npm >= 11.19 stages a publish: the first attempt is accepted and
+            # becomes readable a minute or two later, so a re-run of a
+            # *successful* publish meets the staged version instead of a
+            # published one. That answer is "still on its way", not "failed":
+            # the version's own `time` entry is what proves the outcome, and the
+            # verification step below waits for it. Any other failure is a real
+            # failure and keeps its exit status.
+            status=0
+            output="$(npm publish ./*.tgz --access public --provenance 2>&1)" || status=$?
+            printf '%s\n' "$output"
+            if [ "$status" -ne 0 ]; then
+              if printf '%s' "$output" | grep -q 'previously staged version'; then
+                echo "::notice::$name@$version is already staged and awaiting registry propagation"
+              else
+                exit "$status"
+              fi
+            fi
+          fi
+
+      - name: Verify the registry serves exactly these bytes
+        run: |
+          set -eu
+          name="$(node -p "require('./release-metadata.json').name")"
+          version="$(node -p "require('./release-metadata.json').version")"
+          local_sha1="$(cut -d' ' -f1 SHA1SUMS)"
+          local_integrity="sha512-$(openssl dgst -sha512 -binary ./*.tgz | openssl base64 -A)"
+          # A publish is accepted before it is readable, and the read path is
+          # cached on top of that: an accepted release was measured at 173s from
+          # publish to a readable version document, so the window is bounded at
+          # five minutes rather than one.
+          attempts=60
+          delay=5
+          remote_sha1=""
+          remote_integrity=""
+          for attempt in $(seq 1 "$attempts"); do
+            remote_sha1="$(npm view "$name@$version" dist.shasum 2>/dev/null || true)"
+            remote_integrity="$(npm view "$name@$version" dist.integrity 2>/dev/null || true)"
+            if [ -n "$remote_sha1" ] && [ -n "$remote_integrity" ]; then break; fi
+            echo "attempt $attempt/$attempts: $name@$version is not readable yet; retrying in ${delay}s"
+            sleep "$delay"
+          done
+          echo "local  sha1=$local_sha1"        | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "remote sha1=$remote_sha1"       | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "local  integrity=$local_integrity"  | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "remote integrity=$remote_integrity" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ -z "$remote_sha1" ] || [ -z "$remote_integrity" ]; then
+            echo "::error::$name@$version is still not readable after $((attempts * delay))s. npm accepts a publish before the read path serves it, so this is not proof that the publish failed: check the version's dist-tags and \`npm view $name@$version\`, then re-run this job — do not push a new tag for the same version."
+            exit 1
+          fi
+          if [ "$local_sha1" != "$remote_sha1" ] || [ "$local_integrity" != "$remote_integrity" ]; then
+            echo "::error::registry contents differ from the qualified artifact"
+            exit 1
+          fi
+
+  release:
+    name: release
+    needs: [qualify, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+
+      - name: Check whether this tag already has a release
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.qualify.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "exists=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=no" >> "$GITHUB_OUTPUT"
+          fi
+
+      # An existing release is never overwritten. It is accepted only when it
+      # still targets this tag and carries the exact assets the qualification job
+      # produced; anything else fails the run for a human to look at.
+      - name: Verify the existing release matches the qualified artifact
+        if: steps.existing.outputs.exists == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.qualify.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          release_tag="$(gh release view "$TAG" --repo "$REPO" --json tagName --jq .tagName)"
+          tarball="$(ls ./*.tgz)"
+          tarball_name="$(basename "$tarball")"
+          if [ "$release_tag" != "$TAG" ]; then
+            echo "::error::release $TAG reports tag '$release_tag'"
+            exit 1
+          fi
+          gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name' > assets.txt
+          for name in "$tarball_name" release-metadata.json; do
+            if ! grep -qxF "$name" assets.txt; then
+              echo "::error::release $TAG is missing asset $name"
+              exit 1
+            fi
+          done
+          rm -rf existing && mkdir existing
+          gh release download "$TAG" --repo "$REPO" --dir existing
+          qualified_sha1="$(cut -d' ' -f1 SHA1SUMS)"
+          qualified_sha512="$(cut -d' ' -f1 SHA512SUMS)"
+          released_sha1="$(sha1sum "existing/$tarball_name" | cut -d' ' -f1)"
+          released_sha512="$(sha512sum "existing/$tarball_name" | cut -d' ' -f1)"
+          if [ "$qualified_sha1" != "$released_sha1" ] || [ "$qualified_sha512" != "$released_sha512" ]; then
+            echo "::error::release $TAG carries a tarball that differs from the qualified artifact"
+            echo "::error::qualified sha1=$qualified_sha1 released sha1=$released_sha1"
+            exit 1
+          fi
+          if ! diff -q release-metadata.json existing/release-metadata.json >/dev/null; then
+            echo "::error::release $TAG carries different release metadata"
+            exit 1
+          fi
+          {
+            echo "### Existing release verified"
+            echo '```'
+            echo "tag: $release_tag"
+            echo "asset: $tarball_name sha1=$released_sha1"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create the GitHub release for the tag
+        if: steps.existing.outputs.exists == 'no'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.qualify.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          # No checkout in this job: name the repository instead of relying on a
+          # local git remote.
+          gh release create "$TAG" \
+            ./*.tgz release-metadata.json \
+            --repo "$REPO" \
+            --verify-tag \
+            --title "${TAG#v}" \
+            --notes-file notes.md
