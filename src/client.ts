@@ -1,5 +1,7 @@
 // HTTP client for the local Headroom proxy: /v1/compress and /v1/retrieve.
 
+import { isRecord } from "./guards.ts";
+
 export interface CompressRequest {
   readonly model: string;
   readonly toolName: string;
@@ -12,6 +14,8 @@ export interface Compressed {
   readonly text: string;
   readonly tokensBefore: number;
   readonly tokensSaved: number;
+  /** CCR hashes of content Headroom dropped; each leads back to the original. */
+  readonly hashes: readonly string[];
 }
 
 const TIMEOUT_MS = 5000;
@@ -98,7 +102,15 @@ function parseCompressResponse(json: unknown): Compressed {
     text: last.content,
     tokensBefore: json.tokens_before,
     tokensSaved: json.tokens_before - json.tokens_after,
+    hashes: ccrHashes(json.ccr_hashes),
   };
+}
+
+function ccrHashes(value: unknown): readonly string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || !value.every((hash) => typeof hash === "string"))
+    throw new Error("Headroom /v1/compress returned malformed ccr_hashes");
+  return value;
 }
 
 export async function isProxyHealthy(
@@ -125,8 +137,4 @@ async function readJson(response: Response): Promise<unknown> {
 function withTimeout(signal: AbortSignal | undefined): AbortSignal {
   const timeout = AbortSignal.timeout(TIMEOUT_MS);
   return signal ? AbortSignal.any([signal, timeout]) : timeout;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

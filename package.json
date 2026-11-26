@@ -1,7 +1,7 @@
 {
   "name": "@twkrash/pi-headroom",
-  "version": "0.1.1",
-  "description": "Headroom compression for Pi tool results: compressed once when a tool finishes, so the prompt cache stays intact. Works with every provider and with subagents.",
+  "version": "0.2.0",
+  "description": "Headroom compression for Pi tool results: each result compressed once and replayed byte for byte, so the prompt cache stays intact. Originals stay in the session. Works with every provider and with subagents.",
   "type": "module",
   "license": "MIT",
   "author": "twKrash",

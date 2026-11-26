@@ -1,8 +1,4 @@
-// Decides whether one finished tool result goes through Headroom, and what replaces it.
-//
-// Compressing at tool_result time (not in the per-request `context` hook) means each
-// result is compressed once and stored compressed in the session, so every later
-// request resends identical bytes and the provider prompt cache stays intact.
+// Decides whether one new tool result goes through Headroom, and what replaces it.
 
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { compressToolOutput } from "./client.ts";
@@ -18,13 +14,23 @@ export interface ToolOutput {
   readonly content: readonly (TextContent | ImageContent)[];
 }
 
+/**
+ * - `skipped`: not eligible (too small, mixed content, no model); nothing to record.
+ * - `aborted`: the request was cancelled before an answer; decide on the next request.
+ * - `unchanged`: Headroom saved nothing; the original is sent.
+ * - `failed`: the proxy failed; the original is sent.
+ * - `compressed`: `text` replaces the original from now on.
+ */
 export type Outcome =
   | { readonly kind: "skipped" }
+  | { readonly kind: "aborted" }
+  | { readonly kind: "unchanged" }
   | {
       readonly kind: "compressed";
       readonly text: string;
       readonly tokensBefore: number;
       readonly tokensSaved: number;
+      readonly hashes: readonly string[];
     }
   | { readonly kind: "failed"; readonly error: Error };
 
@@ -51,10 +57,10 @@ export async function compressToolResult(
       },
       signal,
     );
-    if (compressed.tokensSaved <= 0) return SKIPPED;
+    if (compressed.tokensSaved <= 0) return { kind: "unchanged" };
     return { kind: "compressed", ...compressed, text: compressed.text + note };
   } catch (error) {
-    if (signal?.aborted) return SKIPPED;
+    if (signal?.aborted) return { kind: "aborted" };
     return {
       kind: "failed",
       error: error instanceof Error ? error : new Error(String(error)),
@@ -79,7 +85,7 @@ function splitTrailingNote(text: string): {
 }
 
 // Only large single-text results are compressed; mixed text and image results pass through.
-function compressibleText(output: ToolOutput): string | undefined {
+export function compressibleText(output: ToolOutput): string | undefined {
   // Retrieved originals must reach the model in full, or retrieval loops forever.
   if (output.toolName === RETRIEVE_TOOL_NAME) return undefined;
   const [first, ...rest] = output.content;
