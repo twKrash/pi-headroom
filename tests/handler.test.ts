@@ -146,8 +146,8 @@ describe("compressToolResult", () => {
     );
   });
 
-  it("keeps a saving of a single token", async () => {
-    reply = compressReply("short", 11, 10);
+  it("keeps a saving of exactly 200 tokens and a tenth", async () => {
+    reply = compressReply("short", 2000, 1800);
 
     const outcome = await compressToolResult(
       baseUrl,
@@ -159,6 +159,20 @@ describe("compressToolResult", () => {
     assert.equal(outcome.kind, "compressed");
   });
 
+  for (const [label, before, after] of [
+    ["under 200 tokens", 1000, 801],
+    ["under a tenth of the result", 5000, 4501],
+  ] as const) {
+    it(`sends the original when the saving is ${label}`, async () => {
+      reply = compressReply("short", before, after);
+
+      assert.deepEqual(
+        await compressToolResult(baseUrl, bashOutput(LARGE), MODEL, undefined),
+        { kind: "unchanged" },
+      );
+    });
+  }
+
   it("takes the compressed text from the last message", async () => {
     reply = (_request, _body, response) =>
       json(response, 200, {
@@ -167,7 +181,7 @@ describe("compressToolResult", () => {
           { role: "assistant", content: "not this" },
           { role: "tool", content: "short" },
         ],
-        tokens_before: 100,
+        tokens_before: 1000,
         tokens_after: 10,
       });
 
@@ -283,6 +297,20 @@ describe("compressToolResult", () => {
     assert.equal(requests.length, 0);
   });
 
+  for (const toolName of ["ctx_execute", "ctx_search", "ctx_batch"]) {
+    it(`skips context-mode's already compact ${toolName} output`, async () => {
+      const outcome = await compressToolResult(
+        baseUrl,
+        bashOutput(LARGE, toolName),
+        MODEL,
+        undefined,
+      );
+
+      assert.deepEqual(outcome, { kind: "skipped" });
+      assert.equal(requests.length, 0);
+    });
+  }
+
   it("skips results that mix text and images", async () => {
     const output: ToolOutput = {
       ...bashOutput(LARGE),
@@ -316,7 +344,7 @@ describe("compressToolResult", () => {
     reply = (_request, _body, response) =>
       json(response, 200, {
         messages: [{ role: "tool", content: "short" }],
-        tokens_before: 100,
+        tokens_before: 1000,
         tokens_after: 10,
         ccr_hashes: ["7ab7164e7f530556f5e9fb68"],
       });

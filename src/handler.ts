@@ -6,6 +6,12 @@ import { compressToolOutput } from "./client.ts";
 export const RETRIEVE_TOOL_NAME = "headroom_retrieve";
 // Below this size the proxy round-trip costs more than it can save.
 export const MIN_CHARS = 2000;
+// A smaller saving is not worth a `Retrieve more` marker the model may follow back.
+const MIN_SAVED_TOKENS = 200;
+const MIN_SAVED_SHARE = 0.1;
+// context-mode's tools return output that is already summarised; Headroom finds
+// almost nothing left to cut. Without context-mode, no result carries these names.
+const ALREADY_COMPACT = new Set(["ctx_execute", "ctx_search", "ctx_batch"]);
 
 export interface ToolOutput {
   readonly toolName: string;
@@ -57,7 +63,9 @@ export async function compressToolResult(
       },
       signal,
     );
-    if (compressed.tokensSaved <= 0) return { kind: "unchanged" };
+    if (!isWorthIt(compressed.tokensSaved, compressed.tokensBefore)) {
+      return { kind: "unchanged" };
+    }
     return { kind: "compressed", ...compressed, text: compressed.text + note };
   } catch (error) {
     if (signal?.aborted) return { kind: "aborted" };
@@ -66,6 +74,13 @@ export async function compressToolResult(
       error: error instanceof Error ? error : new Error(String(error)),
     };
   }
+}
+
+function isWorthIt(tokensSaved: number, tokensBefore: number): boolean {
+  return (
+    tokensSaved >= MIN_SAVED_TOKENS &&
+    tokensSaved >= tokensBefore * MIN_SAVED_SHARE
+  );
 }
 
 // Pi ends truncated output with a one-line note such as
@@ -88,6 +103,7 @@ function splitTrailingNote(text: string): {
 export function compressibleText(output: ToolOutput): string | undefined {
   // Retrieved originals must reach the model in full, or retrieval loops forever.
   if (output.toolName === RETRIEVE_TOOL_NAME) return undefined;
+  if (ALREADY_COMPACT.has(output.toolName)) return undefined;
   const [first, ...rest] = output.content;
   if (first?.type !== "text" || rest.length > 0) return undefined;
   return first.text.length >= MIN_CHARS ? first.text : undefined;

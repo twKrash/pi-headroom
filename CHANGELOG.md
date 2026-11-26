@@ -4,6 +4,15 @@ All notable changes will follow [Keep a Changelog](https://keepachangelog.com/en
 
 ## [Unreleased]
 
+## [0.2.1]
+
+### Changed
+
+- A compression is kept only if it saves at least 200 tokens and at least a tenth of the result; otherwise the original is sent.
+- context-mode's `ctx_execute`, `ctx_search` and `ctx_batch` output is skipped without calling the proxy.
+- On the first request after a compaction, when nothing past the system prompt is cached, kept results that are not yet compressed are compressed.
+- README: the comparison table names the package `@twkrash/pi-headroom`, and the claude-bridge limit is removed: compressed results reach Claude Code through the bridge.
+
 ## [0.2.0]
 
 ### Changed

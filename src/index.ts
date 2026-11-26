@@ -8,7 +8,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { retrieveOriginal } from "./client.ts";
-import { applyDecisions, planContext } from "./context.ts";
+import { applyDecisions, isCacheCold, planContext } from "./context.ts";
 import {
   DECISION_ENTRY_TYPE,
   type Decision,
@@ -46,7 +46,11 @@ export default function headroom(pi: ExtensionAPI): void {
   // context_with_system sends the returned list as is; the plain `context` hook would
   // rebuild the leading system message from a changed list and move the cached prefix.
   pi.on("context_with_system", async (event, ctx) => {
-    const plan = planContext(event.messages, state.decisions);
+    const plan = planContext(
+      event.messages,
+      state.decisions,
+      isCacheCold(ctx.sessionManager.getBranch()),
+    );
     for (const toolCallId of plan.frozen) {
       record(pi, state, { toolCallId, kind: "passthrough" });
     }
@@ -113,6 +117,9 @@ async function decide(
 }
 
 function record(pi: ExtensionAPI, state: State, decision: Decision): void {
+  // A retry after a compaction that again saves nothing changes nothing.
+  const stored = state.decisions.get(decision.toolCallId);
+  if (stored?.kind === "passthrough" && decision.kind === "passthrough") return;
   state.decisions.set(decision.toolCallId, decision);
   pi.appendEntry(DECISION_ENTRY_TYPE, decision);
 }
