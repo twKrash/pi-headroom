@@ -5,7 +5,7 @@
 **Smaller tool results for Pi, without breaking the prompt cache.**
 
 [Headroom](https://github.com/headroomlabs-ai/headroom) compression for [Pi](https://github.com/earendil-works/pi) —
-every provider, every subagent, compressed once and stored compressed.
+every provider, every subagent, each result compressed once and replayed byte for byte.
 
 [![npm version](https://img.shields.io/npm/v/@twkrash/pi-headroom)](https://www.npmjs.com/package/@twkrash/pi-headroom)
 
@@ -28,7 +28,7 @@ Coding agents spend most of their input tokens re-reading tool output: logs, JSO
 | 1,500-line application log with one `FATAL` line | 12,816 tokens | 47 tokens | repeated `INFO` lines folded; the `FATAL` line kept |
 | 400-row JSON array | 13,880 tokens | 5,732 tokens | rewritten as a table, nothing lost |
 
-Pi Headroom sends each large tool result through your local Headroom proxy the moment the tool finishes, and stores the compressed text in the session. Anything Headroom dropped stays one tool call away: the model calls `headroom_retrieve` with the hash from the `Retrieve more: hash=…` marker and gets the original back.
+Before each model call, Pi Headroom sends every new large tool result through your local Headroom proxy, once, and records the result in the session. Every later call replays that recorded text byte for byte, while the session keeps the original. Anything Headroom dropped stays one tool call away: the model calls `headroom_retrieve` with the hash from the `Retrieve more: hash=…` marker and gets the original back, from the proxy or, once the proxy has let it go, from the session.
 
 ```text
 caveman level: LITE | headroom -47.5k tok (89%) · 2 results | jev: auto
@@ -36,16 +36,24 @@ caveman level: LITE | headroom -47.5k tok (89%) · 2 results | jev: auto
 
 ## Why another Headroom extension?
 
-Pi already has Headroom extensions. They all compress in Pi's `context` hook, which runs before every model call: the conversation is compressed again on each request, and the compressed text is never stored. Provider prompt caches match on the exact bytes of the conversation prefix, so that approach relies on every pass producing byte-identical output for messages the provider has already cached.
+Pi already has Headroom extensions. They all compress in Pi's `context` hook, which runs before every model call: the conversation is compressed again on each request, and nothing is recorded. Provider prompt caches match on the exact bytes of the conversation prefix, so that approach relies on every pass producing byte-identical output for messages the provider has already cached, through proxy restarts, outages and Headroom upgrades.
 
-Pi Headroom compresses in the `tool_result` hook instead, once per result, before the result first reaches the model. The session stores the compressed text, so every later request resends the same bytes. Cache stability holds by construction, not by repeating the same computation.
+Pi Headroom follows Headroom's own cache mode instead, which freezes what the provider has cached and compresses only new content, and makes that state part of the session:
+
+- **Compress once.** A tool result after the last assistant message has never been sent, so it is compressed now. The decision is stored with `pi.appendEntry()`.
+- **Replay forever.** Every later request sends the stored text byte for byte, without calling the proxy. `/resume`, restarts and proxy restarts change nothing.
+- **Never rewrite the past.** A result that was already sent unchanged (Headroom saved nothing, the proxy was down, the extension was installed mid-session) stays unchanged for good.
+- **Keep the original.** The session stores the full tool result, so `headroom_retrieve` works for the life of the session, and uninstalling the extension brings every original back.
+
+It hooks `context_with_system`, which sends the returned messages as they are; the plain `context` hook would rebuild the leading system message whenever the list changes.
 
 | | **Pi Headroom** | [@casualjim/pi-headroom](https://www.npmjs.com/package/@casualjim/pi-headroom) | [@cltec/pi-make-headroom](https://www.npmjs.com/package/@cltec/pi-make-headroom) | [pi-headroom](https://www.npmjs.com/package/pi-headroom) |
 |---|---|---|---|---|
-| When it compresses | once, when a tool finishes | before every model call | before every model call | before every model call |
-| What the session stores | compressed text | original text | original text | original text |
+| When it compresses | once per tool result, before the first call that sends it | every model call | every model call | every model call |
+| Cache stability | stored decisions, replayed byte for byte | recompression must repeat exactly | recompression must repeat exactly | recompression must repeat exactly |
+| What the session stores | original text, plus the compressed text | original text | original text | original text |
 | Headroom proxy | yours, never started for you; setup notice if missing | yours | installed and run in a private venv | installed with pip and run by the extension |
-| `headroom_retrieve` tool | ✓ | ✓ | — | — |
+| `headroom_retrieve` tool | ✓, falls back to the session when the proxy's copy has expired | ✓ | — | — |
 | Pi's truncation note (`[Showing lines … Full output: …]`) | kept aside, re-appended verbatim | — | — | — |
 | Subagents | one `settings.json` entry | — | — | — |
 | Headroom dashboard | listed as **Pi** (`x-client: pi`) | — | — | — |
@@ -114,9 +122,10 @@ Every request carries `x-client: pi`, so the Headroom dashboard at <http://127.0
 
 ## Limits
 
-- Originals live in the proxy's memory for 30 minutes (`HEADROOM_CCR_TTL_SECONDS`) and are lost when the proxy restarts. The session keeps only the compressed text, so after that the model has to rerun the tool.
+- The proxy keeps originals for 30 minutes (`HEADROOM_CCR_TTL_SECONDS`). After that, `headroom_retrieve` reads them from the session. Subagents run with `--no-session`, so theirs last as long as the subagent.
+- The session file grows by the compressed text of each compressed result, next to the original it already holds.
 - The "not installed" check looks for a POSIX executable named `headroom` on `PATH`.
-- Turns run through `pi-claude-bridge` execute their tools inside Claude Code, outside Pi's `tool_result` hook.
+- Turns run through `pi-claude-bridge` are sent from Claude Code's own session, which Pi Headroom does not reach.
 
 ## Run from source
 

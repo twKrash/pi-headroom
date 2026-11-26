@@ -1,49 +1,36 @@
 // Footer status for this Pi session's Headroom activity.
 
-import type { Outcome } from "./handler.ts";
+import type { Decision } from "./decisions.ts";
 
-export interface Footer {
+export interface Totals {
   readonly results: number;
   readonly tokensBefore: number;
   readonly tokensSaved: number;
-  /** Set while the proxy is unusable; the footer then shows why instead of totals. */
-  readonly proxyError: string | undefined;
 }
 
-export const START_FOOTER: Footer = {
-  results: 0,
-  tokensBefore: 0,
-  tokensSaved: 0,
-  proxyError: undefined,
-};
-
-export function nextFooter(footer: Footer, outcome: Outcome): Footer {
-  switch (outcome.kind) {
-    case "skipped":
-      return footer;
-    case "failed":
-      return { ...footer, proxyError: outcome.error.message };
-    case "compressed":
-      return {
-        results: footer.results + 1,
-        tokensBefore: footer.tokensBefore + outcome.tokensBefore,
-        tokensSaved: footer.tokensSaved + outcome.tokensSaved,
-        proxyError: undefined,
-      };
-    default: {
-      const unreachable: never = outcome;
-      throw new Error(`unhandled outcome ${JSON.stringify(unreachable)}`);
-    }
+export function totalsOf(decisions: Iterable<Decision>): Totals {
+  let results = 0;
+  let tokensBefore = 0;
+  let tokensSaved = 0;
+  for (const decision of decisions) {
+    if (decision.kind !== "compressed") continue;
+    results += 1;
+    tokensBefore += decision.tokensBefore;
+    tokensSaved += decision.tokensSaved;
   }
+  return { results, tokensBefore, tokensSaved };
 }
 
-export function formatFooter(footer: Footer): string {
-  if (footer.proxyError !== undefined)
-    return `headroom offline: ${footer.proxyError}`;
-  if (footer.results === 0) return "headroom ready";
-  const percent = Math.round((footer.tokensSaved / footer.tokensBefore) * 100);
-  const noun = footer.results === 1 ? "result" : "results";
-  return `headroom -${formatTokens(footer.tokensSaved)} tok (${percent}%) · ${footer.results} ${noun}`;
+/** `proxyError` is set while the proxy is unusable; the status then shows why. */
+export function formatStatus(
+  totals: Totals,
+  proxyError: string | undefined,
+): string {
+  if (proxyError !== undefined) return `headroom offline: ${proxyError}`;
+  if (totals.results === 0) return "headroom ready";
+  const percent = Math.round((totals.tokensSaved / totals.tokensBefore) * 100);
+  const noun = totals.results === 1 ? "result" : "results";
+  return `headroom -${formatTokens(totals.tokensSaved)} tok (${percent}%) · ${totals.results} ${noun}`;
 }
 
 function formatTokens(tokens: number): string {

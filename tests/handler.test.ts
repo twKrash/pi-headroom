@@ -96,6 +96,7 @@ describe("compressToolResult", () => {
       text: "short",
       tokensBefore: 1000,
       tokensSaved: 990,
+      hashes: [],
     });
     const sent = JSON.parse(requests[0]?.body ?? "{}");
     assert.equal(requests[0]?.url, "/v1/compress");
@@ -126,6 +127,7 @@ describe("compressToolResult", () => {
       text: `short${note}`,
       tokensBefore: 1000,
       tokensSaved: 990,
+      hashes: [],
     });
     assert.equal(
       JSON.parse(requests[0]?.body ?? "{}").messages[1].content,
@@ -220,6 +222,16 @@ describe("compressToolResult", () => {
       { messages: [{ role: "tool", content: "x" }], tokens_before: 2 },
       /no token counts/,
     ],
+    [
+      "ccr_hashes that are not strings",
+      {
+        messages: [{ role: "tool", content: "x" }],
+        tokens_before: 2,
+        tokens_after: 1,
+        ccr_hashes: [5],
+      },
+      /malformed ccr_hashes/,
+    ],
   ] as const) {
     it(`reports failure for a response with ${label}`, async () => {
       reply = (_request, _body, response) => json(response, 200, payload);
@@ -300,12 +312,33 @@ describe("compressToolResult", () => {
     assert.equal(requests.length, 0);
   });
 
-  it("keeps the original when compression saves nothing", async () => {
+  it("returns the CCR hashes of dropped content", async () => {
+    reply = (_request, _body, response) =>
+      json(response, 200, {
+        messages: [{ role: "tool", content: "short" }],
+        tokens_before: 100,
+        tokens_after: 10,
+        ccr_hashes: ["7ab7164e7f530556f5e9fb68"],
+      });
+
+    const outcome = await compressToolResult(
+      baseUrl,
+      bashOutput(LARGE),
+      MODEL,
+      undefined,
+    );
+
+    assert.deepEqual(outcome.kind === "compressed" ? outcome.hashes : [], [
+      "7ab7164e7f530556f5e9fb68",
+    ]);
+  });
+
+  it("reports unchanged when compression saves nothing", async () => {
     reply = compressReply(LARGE, 500, 500);
 
     assert.deepEqual(
       await compressToolResult(baseUrl, bashOutput(LARGE), MODEL, undefined),
-      { kind: "skipped" },
+      { kind: "unchanged" },
     );
   });
 
@@ -356,7 +389,7 @@ describe("compressToolResult", () => {
     assert.equal(outcome.kind, "failed");
   });
 
-  it("skips quietly when the user aborts the request", async () => {
+  it("reports aborted when the user cancels the request", async () => {
     reply = () => {}; // never answers; the abort ends the request
     const controller = new AbortController();
     const pending = compressToolResult(
@@ -367,7 +400,7 @@ describe("compressToolResult", () => {
     );
     controller.abort();
 
-    assert.deepEqual(await pending, { kind: "skipped" });
+    assert.deepEqual(await pending, { kind: "aborted" });
   });
 });
 
