@@ -312,6 +312,60 @@ describe("context_with_system", () => {
   });
 });
 
+describe("after a compaction", () => {
+  const assistantEntry = { type: "message", message: { role: "assistant" } };
+  const compaction = { type: "compaction", summary: "s" };
+  const kept = [user, assistantCalling("call_1"), toolResult("call_1"), answer];
+  const passthrough = {
+    type: "custom",
+    customType: "headroom-decision",
+    data: { toolCallId: "call_1", kind: "passthrough" },
+  };
+
+  it("compresses a sent passthrough result on the first request, then replays it", async () => {
+    const pi = loadExtension({
+      branch: [assistantEntry, passthrough, compaction],
+    });
+    await pi.emit("session_start", {});
+
+    const first = await pi.context(kept);
+    pi.branch.push(assistantEntry);
+    const second = await pi.context(kept);
+
+    const compressed = [
+      user,
+      assistantCalling("call_1"),
+      compressedResult("call_1"),
+      answer,
+    ];
+    assert.deepEqual(first, { messages: compressed });
+    assert.deepEqual(second, { messages: compressed });
+    assert.equal(compressCalls, 1);
+    assert.deepEqual(pi.stored().at(-1), {
+      toolCallId: "call_1",
+      kind: "compressed",
+      text: "short",
+      tokensBefore: 1000,
+      tokensSaved: 990,
+      hashes: [HASH],
+    });
+  });
+
+  it("stores no second passthrough when the retry fails", async () => {
+    compressStatus = 500;
+    const pi = loadExtension({
+      branch: [assistantEntry, passthrough, compaction],
+    });
+    await pi.emit("session_start", {});
+
+    const result = await pi.context(kept);
+
+    assert.equal(result, undefined);
+    assert.equal(compressCalls, 1);
+    assert.equal(pi.stored().length, 1);
+  });
+});
+
 describe("headroom_retrieve", () => {
   it("returns the original from the proxy", async () => {
     const pi = loadExtension();

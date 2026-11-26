@@ -6,6 +6,10 @@
 // in the provider's prompt cache, so without a stored decision it stays unchanged
 // for good. This is the in-session form of Headroom's own cache mode, which
 // freezes already-cached messages and compresses only new content.
+//
+// A compaction replaces the history before the kept messages with a summary, so the
+// first request after it has no cached prefix past the system prompt. On that request
+// every kept result that is not yet compressed may be compressed at no cache cost.
 
 import type { Decision } from "./decisions.ts";
 import { isRecord } from "./guards.ts";
@@ -25,25 +29,47 @@ export interface ContextPlan {
 export function planContext(
   messages: readonly Message[],
   decisions: ReadonlyMap<string, Decision>,
+  cacheCold: boolean,
 ): ContextPlan {
-  const lastAssistant = messages.findLastIndex(
-    (message) => message.role === "assistant",
-  );
   const pending: ToolOutput[] = [];
   const frozen: string[] = [];
-  messages.forEach((message, index) => {
-    if (!isToolResult(message) || decisions.has(message.toolCallId)) return;
+  // Walk back from the newest message: a tool result with an assistant message after
+  // it was part of an earlier request.
+  let answered = false;
+  for (const message of [...messages].reverse()) {
+    if (message.role === "assistant") answered = true;
+    if (!isToolResult(message)) continue;
+    if (!isOpen(decisions.get(message.toolCallId), cacheCold)) continue;
     const output: ToolOutput = {
       toolName: message.toolName,
       toolCallId: message.toolCallId,
       input: inputOf(messages, message.toolCallId),
       content: message.content,
     };
-    if (compressibleText(output) === undefined) return;
-    if (index > lastAssistant) pending.push(output);
-    else frozen.push(message.toolCallId);
-  });
+    if (compressibleText(output) === undefined) continue;
+    // With a cold cache nothing is cached, so nothing needs to stay frozen.
+    if (cacheCold || !answered) pending.unshift(output);
+    else frozen.unshift(message.toolCallId);
+  }
   return { pending, frozen };
+}
+
+/**
+ * True on the first request after a compaction: the branch's newest compaction comes
+ * after its newest assistant message, so no request has been sent since.
+ */
+export function isCacheCold(entries: readonly unknown[]): boolean {
+  const lastCompaction = entries.findLastIndex(
+    (entry) => isRecord(entry) && entry.type === "compaction",
+  );
+  const lastAssistant = entries.findLastIndex(
+    (entry) =>
+      isRecord(entry) &&
+      entry.type === "message" &&
+      isRecord(entry.message) &&
+      entry.message.role === "assistant",
+  );
+  return lastCompaction > lastAssistant;
 }
 
 /** The messages with every compressed decision applied, or undefined when none applies. */
@@ -67,6 +93,13 @@ interface ToolResultMessage extends Message {
   readonly toolCallId: string;
   readonly toolName: string;
   readonly content: ToolOutput["content"];
+}
+
+// A compressed result stays as it is. A passthrough result stays unchanged while its
+// bytes may be cached, and may be compressed again once the cache is cold.
+function isOpen(decision: Decision | undefined, cacheCold: boolean): boolean {
+  if (decision === undefined) return true;
+  return decision.kind === "passthrough" && cacheCold;
 }
 
 function isToolResult(message: Message): message is ToolResultMessage {
